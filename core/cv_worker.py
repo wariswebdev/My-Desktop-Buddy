@@ -1,14 +1,18 @@
 import os
+import json
 import time
 import urllib.request
 import cv2
+import numpy as np
 import mediapipe as mp
 from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtGui import QImage
 from core.detectors import PostureDetector, FatigueDetector
 from mediapipe.tasks.python import vision
-from mediapipe.tasks.python import BaseOptions  # <-- Corrected modern import location
+from mediapipe.tasks.python import BaseOptions  # <-- Corrected modern import layout
 
 MODELS_DIR = "models"
+CONFIG_FILE = "config.json"
 POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
 FACE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 POSE_MODEL_PATH = os.path.join(MODELS_DIR, "pose_landmarker_full.task")
@@ -26,13 +30,17 @@ def download_models():
 
 class CVWorker(QThread):
     """
-    Background worker thread for webcam analysis.
-    Runs at 5 FPS and emits signals without blocking the GUI.
-    Uses the modern MediaPipe Tasks API.
+    Background worker thread running at 15 FPS.
+    Implements a state machine for alerting, OpenCV skeleton drawing,
+    and QImage emission for a live preview window.
     """
     alert_signal = pyqtSignal(str, str)
     status_signal = pyqtSignal(dict)
     calibration_signal = pyqtSignal(str)
+    
+    # UI Notification Signals
+    frame_signal = pyqtSignal(QImage)
+    hide_alert_signal = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -46,41 +54,120 @@ class CVWorker(QThread):
         self.posture_detector = PostureDetector()
         self.fatigue_detector = FatigueDetector()
         
+        # State Machine Flags
+        self.is_alert_state = False
+        
         # State
         self.needs_calibration = True
         self.calibration_frames_collected = 0
-        self.CALIBRATION_TARGET_FRAMES = 15  # 3 seconds at 5 FPS
+        self.CALIBRATION_TARGET_FRAMES = 45  # 3 seconds at 15 FPS
         
         # Alert tracking
-        self.consecutive_slouch = 0
-        self.consecutive_close = 0
-        self.consecutive_yawn = 0
-        self.ALERT_THRESHOLD = 25  # 5 seconds at 5 FPS
+        self.consecutive_bad = 0
+        self.consecutive_good = 0
+        self.ALERT_THRESHOLD = 10  # ~0.6 seconds at 15 FPS
+        self.GOOD_THRESHOLD = 5    # ~0.3 seconds at 15 FPS
         
-        # Cooldowns (timestamps)
-        self.cooldowns = {
-            'slouching': 0,
-            'too_close': 0,
-            'yawning': 0
+        # Load config if exists
+        self._load_config()
+
+    def _load_config(self):
+        """Load calibration baselines from config.json."""
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r') as f:
+                    data = json.load(f)
+                    self.posture_detector.from_dict(data.get('posture', {}))
+                    self.fatigue_detector.from_dict(data.get('fatigue', {}))
+                    
+                    if self.posture_detector.is_calibrated or self.fatigue_detector.is_calibrated:
+                        self.needs_calibration = False
+                        print("Loaded baselines from config.json")
+            except Exception as e:
+                print(f"Failed to load config: {e}")
+
+    def _save_config(self):
+        """Save calibration baselines to config.json."""
+        data = {
+            'posture': self.posture_detector.to_dict(),
+            'fatigue': self.fatigue_detector.to_dict()
         }
-        self.COOLDOWN_SECONDS = 120
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            print(f"Failed to save config: {e}")
+
+    def force_recalibrate(self):
+        """Manually trigger a 3-second calibration phase."""
+        self.needs_calibration = True
+        self.calibration_frames_collected = 0
+        self.posture_detector.is_calibrated = False
+        self.fatigue_detector.is_calibrated = False
 
     def set_posture_enabled(self, enabled):
         self.posture_enabled = enabled
-        self._check_recalibration()
 
     def set_fatigue_enabled(self, enabled):
         self.fatigue_enabled = enabled
-        self._check_recalibration()
-
-    def _check_recalibration(self):
-        """If a feature is turned back on, we should recalibrate."""
-        if self.posture_enabled or self.fatigue_enabled:
-            self.needs_calibration = True
-            self.calibration_frames_collected = 0
 
     def stop(self):
         self._is_running = False
+
+    def _draw_skeleton(self, rgb_frame, landmarks, is_bad, is_pose=True):
+        """
+        Draw anti-aliased skeletal lines and indicators on the RGB frame array.
+        Uses clean proportional rendering rules and visual feedback overlays.
+        """
+        h, w, _ = rgb_frame.shape
+        
+        # High-visibility primary configurations (RGB Format since drawn directly onto rgb_frame)
+        color = (255, 0, 0) if is_bad else (0, 255, 0) # Vibrant Red vs Electric Green
+        text_msg = "CORRECT YOUR POSTURE" if is_bad else "POSTURE OK"
+        
+        # Helper lambda to map raw floating points safely into pixel coordinates
+        def to_pixel(lm):
+            return (int(lm.x * w), int(lm.y * h))
+            
+        # Draw tech-forward anti-aliased vectors
+        if is_pose and len(landmarks) >= 13:
+            nose = to_pixel(landmarks[0])
+            l_eye = to_pixel(landmarks[2])
+            r_eye = to_pixel(landmarks[5])
+            l_shoulder = to_pixel(landmarks[11])
+            r_shoulder = to_pixel(landmarks[12])
+            
+            # Key joints
+            for pt in [nose, l_eye, r_eye, l_shoulder, r_shoulder]:
+                cv2.circle(rgb_frame, pt, 3, color, -1, lineType=cv2.LINE_AA)
+                
+            # Inter-skeletal structural links
+            cv2.line(rgb_frame, l_shoulder, r_shoulder, color, 2, lineType=cv2.LINE_AA)
+            mid_shoulder = ((l_shoulder[0] + r_shoulder[0]) // 2, (l_shoulder[1] + r_shoulder[1]) // 2)
+            cv2.line(rgb_frame, mid_shoulder, nose, color, 2, lineType=cv2.LINE_AA)
+            cv2.line(rgb_frame, l_eye, r_eye, color, 2, lineType=cv2.LINE_AA)
+            
+        elif not is_pose and len(landmarks) >= 468:
+            pts = [10, 152, 234, 454, 13, 14, 78, 308]
+            for idx in pts:
+                pt = to_pixel(landmarks[idx])
+                cv2.circle(rgb_frame, pt, 3, color, -1, lineType=cv2.LINE_AA)
+                
+            # Bounds lines 
+            cv2.line(rgb_frame, to_pixel(landmarks[10]), to_pixel(landmarks[152]), color, 1, lineType=cv2.LINE_AA)
+            cv2.line(rgb_frame, to_pixel(landmarks[234]), to_pixel(landmarks[454]), color, 1, lineType=cv2.LINE_AA)
+            cv2.line(rgb_frame, to_pixel(landmarks[13]), to_pixel(landmarks[14]), color, 2, lineType=cv2.LINE_AA)
+
+        # Render subtle, polished semi-transparent status HUD text
+        cv2.putText(rgb_frame, text_msg, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                    0.6, color, 2, lineType=cv2.LINE_AA)
+
+    def _emit_frame(self, rgb_frame):
+        """Convert numpy array to QImage and emit it to the UI window thread securely."""
+        h, w, ch = rgb_frame.shape
+        bytes_per_line = ch * w
+        q_img = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        self.frame_signal.emit(q_img.copy())
 
     def run(self):
         download_models()
@@ -103,21 +190,19 @@ class CVWorker(QThread):
         face_landmarker = vision.FaceLandmarker.create_from_options(face_options)
 
         cap = None
-        # Keep track of start time for timestamps required by VIDEO mode
         app_start_time = time.time()
 
         while self._is_running:
             loop_start_time = time.time()
 
-            # If both features are off, release camera and sleep
+            # Camera resource manager
             if not self.posture_enabled and not self.fatigue_enabled:
                 if cap is not None and cap.isOpened():
                     cap.release()
                     cap = None
-                time.sleep(0.5)
+                time.sleep(0.1)
                 continue
             
-            # Ensure camera is open
             if cap is None or not cap.isOpened():
                 cap = cv2.VideoCapture(0)
                 if not cap.isOpened():
@@ -126,14 +211,13 @@ class CVWorker(QThread):
 
             ret, frame = cap.read()
             if not ret:
-                time.sleep(0.2)
+                time.sleep(0.066)
                 continue
 
-            # Convert frame to RGB for MediaPipe
+            # In-memory stack RGB frame array mapping
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             
-            # Timestamp required for VIDEO mode
             timestamp_ms = int((time.time() - app_start_time) * 1000)
 
             pose_results = None
@@ -164,62 +248,65 @@ class CVWorker(QThread):
                         self.fatigue_detector.finalize_calibration()
                     
                     self.needs_calibration = False
+                    self._save_config()
                     self.calibration_signal.emit("done")
                 
             # --- Analysis Phase ---
             else:
-                current_time = time.time()
+                is_currently_bad = False
+                bad_type = None
+                draw_landmarks = None
+                is_pose_landmark = True
                 
-                # Posture Analysis
+                # Analyze Posture
                 if self.posture_enabled and pose_results and pose_results.pose_landmarks:
                     p_res = self.posture_detector.analyze(pose_results.pose_landmarks[0])
-                    
-                    # Slouching
-                    if p_res.get('is_slouching'):
-                        self.consecutive_slouch += 1
-                    else:
-                        self.consecutive_slouch = max(0, self.consecutive_slouch - 1)
-                        
-                    # Too Close
-                    if p_res.get('is_too_close'):
-                        self.consecutive_close += 1
-                    else:
-                        self.consecutive_close = max(0, self.consecutive_close - 1)
-
-                    # Trigger Alerts
-                    if self.consecutive_slouch >= self.ALERT_THRESHOLD:
-                        if current_time - self.cooldowns['slouching'] > self.COOLDOWN_SECONDS:
-                            self.alert_signal.emit("Posture Alert", "You're slouching! Sit up straight.")
-                            self.cooldowns['slouching'] = current_time
-                        self.consecutive_slouch = 0
-                        
-                    if self.consecutive_close >= self.ALERT_THRESHOLD:
-                        if current_time - self.cooldowns['too_close'] > self.COOLDOWN_SECONDS:
-                            self.alert_signal.emit("Posture Alert", "You're too close to the screen.")
-                            self.cooldowns['too_close'] = current_time
-                        self.consecutive_close = 0
-
-                # Fatigue Analysis
+                    if p_res.get('is_slouching') or p_res.get('is_too_close'):
+                        is_currently_bad = True
+                        bad_type = "Posture Alert"
+                        draw_landmarks = p_res.get('landmarks')
+                
+                # Analyze Fatigue
                 if self.fatigue_enabled and face_results and face_results.face_landmarks:
                     f_res = self.fatigue_detector.analyze(face_results.face_landmarks[0])
-                    
                     if f_res.get('is_yawning'):
-                        self.consecutive_yawn += 1
-                    else:
-                        self.consecutive_yawn = max(0, self.consecutive_yawn - 1)
-                        
-                    if self.consecutive_yawn >= self.ALERT_THRESHOLD:
-                        if current_time - self.cooldowns['yawning'] > self.COOLDOWN_SECONDS:
-                            self.alert_signal.emit("Fatigue Alert", "Yawning detected. Consider taking a break.")
-                            self.cooldowns['yawning'] = current_time
-                        self.consecutive_yawn = 0
+                        is_currently_bad = True
+                        bad_type = "Fatigue Alert"
+                        draw_landmarks = f_res.get('landmarks')
+                        is_pose_landmark = False
 
-            # Maintain 5 FPS (200ms per frame)
+                # State Machine Tracking Thresholds
+                if is_currently_bad:
+                    self.consecutive_bad += 1
+                    self.consecutive_good = 0
+                else:
+                    self.consecutive_bad = 0
+                    self.consecutive_good += 1
+
+                # Handle Alerts Entry Transitions
+                if not self.is_alert_state and self.consecutive_bad >= self.ALERT_THRESHOLD:
+                    self.is_alert_state = True
+                    msg = "Sit up straight!" if bad_type == "Posture Alert" else "Yawning detected."
+                    self.alert_signal.emit(bad_type, msg)
+
+                # Process Frame Streaming pipelines while Alert is Active
+                if self.is_alert_state:
+                    if draw_landmarks:
+                        self._draw_skeleton(rgb_frame, draw_landmarks, is_currently_bad, is_pose_landmark)
+                    
+                    self._emit_frame(rgb_frame)
+                    
+                    # Dismiss Window automatically when Posture is corrected 
+                    if self.consecutive_good >= self.GOOD_THRESHOLD:
+                        self.is_alert_state = False
+                        self.hide_alert_signal.emit()
+
+            # Maintain exactly 15 FPS (~66.6ms frame intervals)
             elapsed = time.time() - loop_start_time
-            sleep_time = max(0.01, 0.2 - elapsed)
+            sleep_time = max(0.001, (1.0 / 15.0) - elapsed)
             time.sleep(sleep_time)
 
-        # Cleanup on exit
+        # Resource Cleanup
         if cap is not None and cap.isOpened():
             cap.release()
         pose_landmarker.close()

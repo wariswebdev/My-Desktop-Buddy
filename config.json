@@ -1,0 +1,11 @@
+{
+    "posture": {
+        "baseline_nose_y": 0.46022584324791316,
+        "baseline_shoulder_nose_dist": 0.05276944807597569,
+        "baseline_eye_dist": 0.10877223164806345,
+        "is_calibrated": true
+    },
+    "fatigue": {
+        "is_calibrated": true
+    }
+}

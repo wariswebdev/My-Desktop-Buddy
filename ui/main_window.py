@@ -4,6 +4,7 @@ from PyQt6.QtGui import QIcon, QAction
 from PyQt6.QtCore import Qt
 from ui.dashboard import Dashboard
 from core.cv_worker import CVWorker
+from ui.notification import LiveCorrectionAlert
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -70,6 +71,14 @@ class MainWindow(QMainWindow):
         self.cv_worker.alert_signal.connect(self.on_cv_alert)
         self.cv_worker.calibration_signal.connect(self.on_calibration_signal)
         
+        # Setup Live Alert Window
+        self.live_alert = LiveCorrectionAlert()
+        self.cv_worker.frame_signal.connect(self.on_frame_signal)
+        self.cv_worker.hide_alert_signal.connect(self.on_hide_alert_signal)
+        
+        # Connect recalibrate button
+        self.dashboard_page.recalibrate_btn.clicked.connect(self.cv_worker.force_recalibrate)
+        
         # Connect toggles from dashboard
         if "Posture Detection" in self.dashboard_page.feature_widgets:
             posture_widget = self.dashboard_page.feature_widgets["Posture Detection"]
@@ -83,6 +92,14 @@ class MainWindow(QMainWindow):
         
         # Ensure cleanup on quit
         QApplication.instance().aboutToQuit.connect(self.cleanup_worker)
+
+    def on_frame_signal(self, q_image):
+        if not self.live_alert.isVisible():
+            self.live_alert.show()
+        self.live_alert.update_frame(q_image)
+
+    def on_hide_alert_signal(self):
+        self.live_alert.hide()
 
     def cleanup_worker(self):
         self.cv_worker.stop()
@@ -145,6 +162,8 @@ class MainWindow(QMainWindow):
         """Minimize to system tray on close instead of exiting."""
         event.ignore()
         self.hide()
+        if hasattr(self, 'live_alert'):
+            self.live_alert.hide()
         self.tray_icon.showMessage(
             "MyDesktopBuddy",
             "Application is still running in the background.",

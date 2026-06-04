@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QGridLayout, QFrame)
+                             QGridLayout, QFrame, QPushButton)
 from PyQt6.QtCore import Qt
 from ui.widgets import ToggleSwitch
 
@@ -95,4 +95,22 @@ class Dashboard(QWidget):
             features_layout.addWidget(widget)
             
         layout.addWidget(features_frame)
+        
+        # Recalibrate Button
+        self.recalibrate_btn = QPushButton("Recalibrate Baseline")
+        self.recalibrate_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #89b4fa;
+                color: #11111b;
+                border-radius: 5px;
+                padding: 8px 15px;
+                font-weight: bold;
+                margin-top: 10px;
+            }
+            QPushButton:hover {
+                background-color: #b4befe;
+            }
+        """)
+        layout.addWidget(self.recalibrate_btn)
+        
         layout.addStretch()
