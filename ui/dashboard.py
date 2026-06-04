@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QGridLayout, QFrame, QPushButton)
+                             QGridLayout, QFrame, QPushButton, QScrollArea)
 from PyQt6.QtCore import Qt
 from ui.widgets import ToggleSwitch
 
@@ -25,7 +25,16 @@ class FeatureToggleWidget(QWidget):
 class Dashboard(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background-color: #1e1e2e; }")
+        
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(25)
         
@@ -112,5 +121,7 @@ class Dashboard(QWidget):
             }
         """)
         layout.addWidget(self.recalibrate_btn)
-        
         layout.addStretch()
+        
+        scroll_area.setWidget(content_widget)
+        main_layout.addWidget(scroll_area)

@@ -5,6 +5,7 @@ import urllib.request
 import cv2
 import numpy as np
 import mediapipe as mp
+import winsound
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QImage
 from core.detectors import PostureDetector, FatigueDetector
@@ -56,6 +57,7 @@ class CVWorker(QThread):
         
         # State Machine Flags
         self.is_alert_state = False
+        self.current_alert_type = None
         
         # State
         self.needs_calibration = True
@@ -68,6 +70,19 @@ class CVWorker(QThread):
         self.ALERT_THRESHOLD = 10  # ~0.6 seconds at 15 FPS
         self.GOOD_THRESHOLD = 5    # ~0.3 seconds at 15 FPS
         
+        # Settings
+        self.yawn_confirmation_frames = 10
+        self.idle_frames = 0
+        self.IDLE_THRESHOLD = 15 * 30  # 30 seconds at 15 FPS
+        
+        # Analytics
+        self.stats = {
+            'total_frames': 0,
+            'good_frames': 0,
+            'bad_frames': 0,
+            'recent_alerts': []
+        }
+        
         # Load config if exists
         self._load_config()
 
@@ -79,6 +94,7 @@ class CVWorker(QThread):
                     data = json.load(f)
                     self.posture_detector.from_dict(data.get('posture', {}))
                     self.fatigue_detector.from_dict(data.get('fatigue', {}))
+                    self.yawn_confirmation_frames = data.get('yawn_frames', 10)
                     
                     if self.posture_detector.is_calibrated or self.fatigue_detector.is_calibrated:
                         self.needs_calibration = False
@@ -90,7 +106,8 @@ class CVWorker(QThread):
         """Save calibration baselines to config.json."""
         data = {
             'posture': self.posture_detector.to_dict(),
-            'fatigue': self.fatigue_detector.to_dict()
+            'fatigue': self.fatigue_detector.to_dict(),
+            'yawn_frames': self.yawn_confirmation_frames
         }
         try:
             with open(CONFIG_FILE, 'w') as f:
@@ -110,6 +127,15 @@ class CVWorker(QThread):
 
     def set_fatigue_enabled(self, enabled):
         self.fatigue_enabled = enabled
+
+    def update_settings(self, settings):
+        if 'slouch_limit' in settings:
+            self.posture_detector.slouch_limit = settings['slouch_limit']
+        if 'proximity_limit' in settings:
+            self.posture_detector.proximity_limit = settings['proximity_limit']
+        if 'yawn_frames' in settings:
+            self.yawn_confirmation_frames = settings['yawn_frames']
+        self._save_config()
 
     def stop(self):
         self._is_running = False
@@ -228,6 +254,23 @@ class CVWorker(QThread):
             if self.fatigue_enabled:
                 face_results = face_landmarker.detect_for_video(mp_image, timestamp_ms)
 
+            # Battery Saving Idle Check
+            has_landmarks = False
+            if self.posture_enabled and pose_results and pose_results.pose_landmarks:
+                has_landmarks = True
+            if self.fatigue_enabled and face_results and face_results.face_landmarks:
+                has_landmarks = True
+
+            if has_landmarks:
+                self.idle_frames = 0
+                target_fps = 15.0
+            else:
+                self.idle_frames += 1
+                if self.idle_frames > self.IDLE_THRESHOLD:
+                    target_fps = 1.0  # Drop to 1 FPS
+                else:
+                    target_fps = 15.0
+
             # --- Calibration Phase ---
             if self.needs_calibration:
                 if self.calibration_frames_collected == 0:
@@ -276,34 +319,82 @@ class CVWorker(QThread):
                         is_pose_landmark = False
 
                 # State Machine Tracking Thresholds
+                self.stats['total_frames'] += 1
                 if is_currently_bad:
                     self.consecutive_bad += 1
                     self.consecutive_good = 0
+                    self.stats['bad_frames'] += 1
                 else:
                     self.consecutive_bad = 0
                     self.consecutive_good += 1
+                    self.stats['good_frames'] += 1
 
-                # Handle Alerts Entry Transitions
-                if not self.is_alert_state and self.consecutive_bad >= self.ALERT_THRESHOLD:
-                    self.is_alert_state = True
-                    msg = "Sit up straight!" if bad_type == "Posture Alert" else "Yawning detected."
-                    self.alert_signal.emit(bad_type, msg)
+                # Enter Alert State
+                if not self.is_alert_state:
+                    trigger = False
+                    if bad_type == "Fatigue Alert" and self.consecutive_bad >= self.yawn_confirmation_frames:
+                        trigger = True
+                    elif bad_type == "Posture Alert" and self.consecutive_bad >= self.ALERT_THRESHOLD:
+                        trigger = True
 
-                # Process Frame Streaming pipelines while Alert is Active
+                    if trigger:
+                        self.is_alert_state = True
+                        self.current_alert_type = bad_type
+                        
+                        from datetime import datetime
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        
+                        alert_data = {
+                            "timestamp": timestamp,
+                            "type": bad_type,
+                            "status": "Triggered"
+                        }
+                        
+                        self.stats['recent_alerts'].insert(0, alert_data)
+                        if len(self.stats['recent_alerts']) > 10:
+                            self.stats['recent_alerts'].pop()
+                        
+                        if self.current_alert_type == "Fatigue Alert":
+                            self.alert_signal.emit("Fatigue Alert", "Yawning detected. Consider taking a break.")
+                        elif self.current_alert_type == "Posture Alert":
+                            # Beep immediately instead of native popup
+                            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+
+                # While in Alert State, draw overlay and emit frame
                 if self.is_alert_state:
-                    if draw_landmarks:
-                        self._draw_skeleton(rgb_frame, draw_landmarks, is_currently_bad, is_pose_landmark)
+                    if self.current_alert_type == "Posture Alert":
+                        if draw_landmarks:
+                            self._draw_skeleton(rgb_frame, draw_landmarks, is_currently_bad, is_pose_landmark)
+                        
+                        # Emit frame to LiveCorrectionAlert window only for posture
+                        self._emit_frame(rgb_frame)
                     
-                    self._emit_frame(rgb_frame)
-                    
-                    # Dismiss Window automatically when Posture is corrected 
+                    # Exit Alert State if enough good frames are seen
                     if self.consecutive_good >= self.GOOD_THRESHOLD:
                         self.is_alert_state = False
-                        self.hide_alert_signal.emit()
+                        
+                        from datetime import datetime
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        alert_data = {
+                            "timestamp": timestamp,
+                            "type": self.current_alert_type,
+                            "status": "Resolved"
+                        }
+                        self.stats['recent_alerts'].insert(0, alert_data)
+                        if len(self.stats['recent_alerts']) > 10:
+                            self.stats['recent_alerts'].pop()
+                            
+                        if self.current_alert_type == "Posture Alert":
+                            self.hide_alert_signal.emit()
+                        self.current_alert_type = None
 
-            # Maintain exactly 15 FPS (~66.6ms frame intervals)
+            # Emit stats periodically
+            if self.stats['total_frames'] > 0 and self.stats['total_frames'] % 15 == 0:
+                self.status_signal.emit(self.stats)
+
+            # Maintain dynamic FPS intervals
             elapsed = time.time() - loop_start_time
-            sleep_time = max(0.001, (1.0 / 15.0) - elapsed)
+            sleep_time = max(0.001, (1.0 / target_fps) - elapsed)
             time.sleep(sleep_time)
 
         # Resource Cleanup

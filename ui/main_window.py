@@ -1,8 +1,10 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QListWidget, 
                              QStackedWidget, QLabel, QSystemTrayIcon, QMenu, QApplication)
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtGui import QIcon, QAction, QScreen
 from PyQt6.QtCore import Qt
 from ui.dashboard import Dashboard
+from ui.analytics_view import AnalyticsView
+from ui.settings_view import SettingsView
 from core.cv_worker import CVWorker
 from ui.notification import LiveCorrectionAlert
 
@@ -10,7 +12,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MyDesktopBuddy")
-        self.resize(900, 700)
+        self.setFixedSize(960, 640)
+        self.center()
         
         # Central widget and layout
         central_widget = QWidget()
@@ -23,7 +26,7 @@ class MainWindow(QMainWindow):
         # Sidebar Navigation
         self.sidebar = QListWidget()
         self.sidebar.setFixedWidth(220)
-        tabs = ["Dashboard", "Deadlines & Goals", "Focus Music", "Settings"]
+        tabs = ["Dashboard", "Analytics", "Focus Music", "Settings"]
         self.sidebar.addItems(tabs)
         self.sidebar.setCurrentRow(0)
         
@@ -33,22 +36,17 @@ class MainWindow(QMainWindow):
         
         # Initialize Pages
         self.dashboard_page = Dashboard()
-        
-        self.deadlines_page = QLabel("Deadlines & Goals (Coming Soon)")
-        self.deadlines_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.deadlines_page.setStyleSheet("color: #a6adc8; font-size: 18px;")
+        self.analytics_page = AnalyticsView()
         
         self.music_page = QLabel("Focus Music (Coming Soon)")
         self.music_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.music_page.setStyleSheet("color: #a6adc8; font-size: 18px;")
         
-        self.settings_page = QLabel("Settings (Coming Soon)")
-        self.settings_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.settings_page.setStyleSheet("color: #a6adc8; font-size: 18px;")
+        self.settings_page = SettingsView()
         
         # Add pages to stacked widget
         self.stacked_widget.addWidget(self.dashboard_page)
-        self.stacked_widget.addWidget(self.deadlines_page)
+        self.stacked_widget.addWidget(self.analytics_page)
         self.stacked_widget.addWidget(self.music_page)
         self.stacked_widget.addWidget(self.settings_page)
         
@@ -75,9 +73,13 @@ class MainWindow(QMainWindow):
         self.live_alert = LiveCorrectionAlert()
         self.cv_worker.frame_signal.connect(self.on_frame_signal)
         self.cv_worker.hide_alert_signal.connect(self.on_hide_alert_signal)
+        self.cv_worker.status_signal.connect(self.analytics_page.update_stats)
         
         # Connect recalibrate button
         self.dashboard_page.recalibrate_btn.clicked.connect(self.cv_worker.force_recalibrate)
+        
+        # Connect settings page
+        self.settings_page.settings_changed.connect(self.cv_worker.update_settings)
         
         # Connect toggles from dashboard
         if "Posture Detection" in self.dashboard_page.feature_widgets:
@@ -157,6 +159,14 @@ class MainWindow(QMainWindow):
     def show_normal(self):
         self.show()
         self.activateWindow()
+
+    def center(self):
+        """Center the window perfectly on the primary screen."""
+        screen = QApplication.primaryScreen().availableGeometry()
+        size = self.geometry()
+        x = (screen.width() - size.width()) // 2
+        y = (screen.height() - size.height()) // 2
+        self.move(x, y)
 
     def closeEvent(self, event):
         """Minimize to system tray on close instead of exiting."""

@@ -14,13 +14,17 @@ class PostureDetector:
         self.baseline_shoulder_nose_dist = 0.0
         self.baseline_eye_dist = 0.0
         self.is_calibrated = False
+        self.slouch_limit = 0.15
+        self.proximity_limit = 1.15
 
     def to_dict(self):
         return {
             'baseline_nose_y': self.baseline_nose_y,
             'baseline_shoulder_nose_dist': self.baseline_shoulder_nose_dist,
             'baseline_eye_dist': self.baseline_eye_dist,
-            'is_calibrated': self.is_calibrated
+            'is_calibrated': self.is_calibrated,
+            'slouch_limit': self.slouch_limit,
+            'proximity_limit': self.proximity_limit
         }
 
     def from_dict(self, data):
@@ -29,6 +33,8 @@ class PostureDetector:
             self.baseline_shoulder_nose_dist = data.get('baseline_shoulder_nose_dist', 0.0)
             self.baseline_eye_dist = data.get('baseline_eye_dist', 0.0)
             self.is_calibrated = data.get('is_calibrated', False)
+            self.slouch_limit = data.get('slouch_limit', 0.15)
+            self.proximity_limit = data.get('proximity_limit', 1.15)
 
     def calibrate(self, landmarks):
         """Accumulate samples during the calibration phase."""
@@ -81,15 +87,15 @@ class PostureDetector:
         right_eye = landmarks[5]
 
         # 1. Slouching check
-        # If nose drops (y increases) by more than 15% of the baseline shoulder-to-nose distance
-        drop_threshold = self.baseline_shoulder_nose_dist * 0.15
+        # If nose drops (y increases) by more than configured limit
+        drop_threshold = self.baseline_shoulder_nose_dist * self.slouch_limit
         if (nose.y - self.baseline_nose_y) > drop_threshold:
             results['is_slouching'] = True
 
         # 2. Leaning too close check
-        # If inter-eye distance increases by more than 30% from baseline
+        # If inter-eye distance increases by configured limit
         current_eye_dist = distance(left_eye, right_eye)
-        if current_eye_dist > (self.baseline_eye_dist * 1.3):
+        if current_eye_dist > (self.baseline_eye_dist * self.proximity_limit):
             results['is_too_close'] = True
 
         return results
